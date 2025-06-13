@@ -28,6 +28,26 @@ def extract_name(text):
         return span.text
     return None
 # --------------------------------------------------------------------------------
+def classify_links(links):
+    classified = {
+        'linkedin': [],
+        'github': [],
+        'gmail': [],
+        'other': []
+    }
+
+    for link in links:
+        lower_link = link.lower()
+        if 'linkedin.com' in lower_link:
+            classified['linkedin'].append(link)
+        elif 'github.com' in lower_link:
+            classified['github'].append(link)
+        elif 'mailto:' in lower_link and 'gmail.com' in lower_link:
+            classified['gmail'].append(link)
+        else:
+            classified['other'].append(link)
+
+    return classified
 
 # ----------------------------------Extract Email---------------------------------
 def extract_email(doc):
@@ -41,7 +61,15 @@ def extract_email(doc):
             return doc[start:end].text
     return ""
 # --------------------------------------------------------------------------------
-
+def extract_links_from_pdf(pdf_path):
+    links = []
+    doc = fitz.open(pdf_path)
+    for page in doc:
+        for link in page.get_links():
+            uri = link.get("uri", None)
+            if uri:
+                links.append(uri)
+    return links
 # ----------------------------------Extract Phone Number--------------------------
 def extract_contact_number_from_resume(doc):
     text = doc.text
@@ -106,9 +134,73 @@ def extract_major(doc):
         if keyword.lower() in doc.text.lower():
             return keyword
     return ""
+
+# --------------------------------------------------------------------------------
+
+# --------------------------------Extract languge-------------------------------
+from langdetect import detect
+from langdetect.lang_detect_exception import LangDetectException
+from langcodes import Language
+def detect_language_name(text):
+    try:
+        lang_code = detect(text)
+        return Language.get(lang_code).display_name()
+    except LangDetectException:
+        return "Unknown"
+
+def extract_languages_with_levels_from_pdf(pdf_path):
+    languages = []
+    known_levels = ["native", "fluent", "advanced", "intermediate", "basic", "beginner", "b1", "b2", "c1", "c2", "a1", "a2"]
+    known_languages = ["arabic", "english", "french", "german", "spanish"]
+
+    full_text = ""
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
+            full_text += "\n" + text  
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            in_languages_section = False
+            
+            for line in lines:
+                if re.search(r'\blanguages\b', line, re.IGNORECASE):
+                    in_languages_section = True
+                    continue
+
+                if in_languages_section:
+                    if re.search(r'\b(skills|experience|projects|certifications|education)\b', line, re.IGNORECASE):
+                        break
+
+                    lower_line = line.lower()
+                    for lang in known_languages:
+                        if lang in lower_line:
+                            level_found = None
+                            for lvl in known_levels:
+                                if lvl in lower_line:
+                                    level_found = lvl.capitalize()
+                                    break
+                            languages.append({
+                                "language": lang.capitalize(),
+                                "level": level_found or "Unknown"
+                            })
+
+    # ✅ في حال لم يتم العثور على أي لغة من القسم المحدد
+    if not languages:
+        lower_full_text = full_text.lower()
+        for lang in known_languages:
+            if lang in lower_full_text:
+                languages.append({
+                    "language": lang.capitalize(),
+                    "level": "Unknown"
+                })
+
+    return languages
 # --------------------------------------------------------------------------------
 
 # --------------------------------Extract Experience-------------------------------
+
 def extract_experience(doc):
     verbs = [token.text.lower() for token in doc if token.pos_ == 'VERB']
 
@@ -132,6 +224,55 @@ def extract_experience(doc):
         'suggested_position': suggested_position
     }
 # --------------------------------------------------------------------------------
+def extract_experiences(text):
+    experience_section_keywords = ['experience', 'work experience', 'professional experience']
+    experiences = []
+
+    lines = text.split('\n')
+    experience_lines = []
+    collecting = False
+
+    for line in lines:
+        line_clean = line.strip().lower()
+        if any(keyword in line_clean for keyword in experience_section_keywords):
+            collecting = True
+            continue
+        if collecting:
+            if line.strip() == "" or line.lower().startswith("education") or line.lower().startswith("skills"):
+                break  
+            experience_lines.append(line.strip())
+
+    current_exp = {}
+    for line in experience_lines:
+        date_match = re.search(r'(\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|'
+                               r'May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|'
+                               r'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[\s\-.,]?\d{4})\s*(?:-|to)?\s*'
+                               r'(\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|'
+                               r'May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|'
+                               r'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[\s\-.,]?\d{4}|present)?', line, re.IGNORECASE)
+
+        if date_match:
+            if current_exp:
+                experiences.append(current_exp)
+                current_exp = {}
+            current_exp['start_date'] = date_match.group(1)
+            current_exp['end_date'] = date_match.group(2) if date_match.group(2) else "Present"
+        elif 'at' in line.lower() and ' | ' not in line:
+            parts = line.split(' at ')
+            if len(parts) == 2:
+                current_exp['job_title'] = parts[0].strip()
+                current_exp['company'] = parts[1].strip()
+        else:
+            # وصف المهمة
+            if 'description' in current_exp:
+                current_exp['description'] += " " + line
+            else:
+                current_exp['description'] = line
+
+    if current_exp:
+        experiences.append(current_exp)
+
+    return experiences
 
 # -----------------------------------Suggestions----------------------------------
 def load_positions_keywords(file_path):
@@ -167,33 +308,80 @@ def extract_resume_info(doc):
     skills = extract_skills(doc)
     degree_major = extract_major(doc)
     experience = extract_experience(doc)
+    experiences = extract_experiences(doc.text)
+    language = extract_language(doc.text)  
 
     return {
         'name': name,
-        
         'email': email,
         'phone': phone,
         'education': education,
         'skills': skills,
         'degree_major': degree_major,
-        'experience': experience
+        'experience': experience,
+        'experiences': experiences,
+        'language': language,  
     }
 
-def main():
-    # ضع هنا اسم ملف السيرة الذاتية الموجود في مجلد data
-    resume_path = 'data/Safa_Abou_zaid.pdf'  # غيره إلى اسم ملف لديك
+import pdfplumber
+def extract_from_pdf(pdf_path):
+    text = ""
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+    doc = nlp(text)
 
-    print(f"تحميل السيرة الذاتية من: {resume_path}")
-    doc = extract_resume_info_from_pdf(resume_path)
-    info = extract_resume_info(doc)
+    # Basic information extraction
+    name = extract_name(text)
+    email = extract_email(doc)
+    phone = extract_contact_number_from_resume(doc)
+    education = extract_education_from_resume(doc)
+    skills = extract_skills(doc)
+    major = extract_major(doc)
+    experience_info = extract_experience(doc)
+    languages = extract_languages_with_levels_from_pdf(pdf_path)
+    links = extract_links_from_pdf(pdf_path)
+    classified_links = classify_links(links)
 
-    print(f"Full Name: {info['name'] if info['name'] else 'Not Found'}")
-    print(f"Email: {info['email'] if info['email'] else 'Not Found'}")
-    print(f"Phone Number: {info['phone'] if info['phone'] else 'Not Found'}")
-    print(f"Education (Universities/Institutes): {', '.join(info['education']) if info['education'] else 'Not Found'}")
-    print(f"Skills: {', '.join(info['skills']) if info['skills'] else 'Not Found'}")
-    print(f"Experience Level: {info['experience']['level_of_experience']}")
-    print(f"Suggested Position: {info['experience']['suggested_position']}")
+    # Compose final result dictionary
+    result = {
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "education": education,
+        "skills": skills,
+        "major": major,
+        "experience_level": experience_info.get('level_of_experience'),
+        "suggested_position": experience_info.get('suggested_position'),
+        "languages": languages,
+        "links": classified_links
+    }
 
-if __name__ == '__main__':
-    main()
+    return result
+
+# ----------------------------------Example Usage-------------------------------
+result = extract_from_pdf("data/Safa_Abou_zaid.pdf")
+print(result)
+
+
+
+import pdfplumber
+
+def extract_text_from_pdf(pdf_path):
+    text = ""
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text()
+    return text
+
+pdf_path = "data/Safa_Abou_zaid.pdf"
+text = extract_text_from_pdf(pdf_path)
+
+
+print("="*40)
+print("PDF TEXT CONTENT:")
+print("="*40)
+print(text)
+print("="*40)
